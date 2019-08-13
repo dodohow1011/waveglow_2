@@ -28,9 +28,10 @@ import torch
 import torch.nn as nn
 from torch.autograd import Variable
 from layers import ConvNorm
-from Encoder import Encoder, position_encoding, TacoEncoder
+# from Encoder import Encoder, position_encoding, TacoEncoder
 from Attention import ScaledDotProductAttention
 from SubLayer import DecoderLayer
+from Taco2 import Encoder, Decoder
 import torch.nn.functional as F
 import math
 import sys
@@ -67,7 +68,7 @@ class WaveGlowLoss(nn.Module):
                 log_det_W_total += log_det_W_list[i]
 
         n = z.size(0)*z.size(1)*z.size(2)
-        loss = torch.sum(z*z)/(2*self.sigma*self.sigma) - 0.1*log_s_total - log_det_W_total
+        loss = torch.sum(z*z)/(2*self.sigma*self.sigma) - log_s_total - log_det_W_total
         print ("{}, {}, {}".format(torch.sum(z*z)/(2*self.sigma*self.sigma*n), log_s_total/n, log_det_W_total/n))
         return loss/(z.size(0)*z.size(1)*z.size(2))
 
@@ -116,12 +117,13 @@ class Invertible1x1Conv(nn.Module):
 
 
 
-class Decoder(nn.Module):
+'''class Decoder(nn.Module):
     def __init__(self, d_o, d_inner, n_head, d_mel_half, d_k, d_v, dropout=0.1):
         super(Decoder, self).__init__()
         self.linear = nn.Linear(d_mel_half, d_o)  # 40 -> 256
         self.decoder = DecoderLayer(d_o, d_inner, n_head, d_k, d_v, dropout=dropout)
         self.output = nn.Linear(d_o, 2*d_mel_half)
+        self.layer_norm = nn.LayerNorm(2*d_mel_half)
     
     def forward(self, mel_0, enc_output):
         
@@ -129,8 +131,9 @@ class Decoder(nn.Module):
         mel_0 = self.linear(mel_0) # 40 -> 256
         dec_output, dec_enc_attn = self.decoder(mel_0, enc_output)
         dec_output = self.output(dec_output)
+        dec_output = self.layer_norm(dec_output)
         dec_output = dec_output.transpose(1 ,2)
-        return dec_output, dec_enc_attn
+        return dec_output, dec_enc_attn'''
 
 class WaveGlow(nn.Module):
     def __init__(self, hparams):
@@ -167,20 +170,23 @@ class WaveGlow(nn.Module):
         std = math.sqrt(2.0 / (hparams.n_symbols + hparams.symbols_embedding_dim))
         val = math.sqrt(3.0) * std  # uniform bounds for std
         self.embedding.weight.data.uniform_(-val, val)
-        self.TE = TacoEncoder(hparams)
+        self.TE = Encoder(hparams)
+        self.TD = nn.ModuleList()
+        # self.TD = Decoder(hparams)
         
         # Positional encoding for mel-spectrogram
-        self.position_enc = nn.Embedding.from_pretrained(
+        '''self.position_enc = nn.Embedding.from_pretrained(
             position_encoding(self.max_mel_steps, hparams.n_mel_channels, padding_idx=0),
-            freeze=True)
+            freeze=True)'''
         # Set up layers with the right sizes based on how many dimensions
         # have been output already
         n_remaining_channels = hparams.n_mel_channels
         for k in range(self.n_flows):
-            if k % self.n_early_every == 0 and k > 0:
-                n_remaining_channels = n_remaining_channels - self.n_early_size
+            '''if k % self.n_early_every == 0 and k > 0:
+                n_remaining_channels = n_remaining_channels - self.n_early_size'''
             self.convinv.append(Invertible1x1Conv(n_remaining_channels))
-            self.decoder.append(Decoder(d_o=self.d_o, d_inner=self.d_inner, d_mel_half =n_remaining_channels//2, n_head=self.n_head, d_k=self.d_k, d_v=self.d_v, dropout=self.dropout))
+            # self.decoder.append(Decoder(d_o=self.d_o, d_inner=self.d_inner, d_mel_half =n_remaining_channels//2, n_head=self.n_head, d_k=self.d_k, d_v=self.d_v, dropout=self.dropout))
+            self.TD.append(Decoder(hparams))
         self.n_remaining_channels = n_remaining_channels  # Useful during inference
 
     def forward(self, mel, words, mel_pos, src_pos, input_lengths):
@@ -190,27 +196,31 @@ class WaveGlow(nn.Module):
         output_mel = []
         log_s_list = []
         log_det_W_list = []
+        dec_enc_attn = []
 
         # enc_output, enc_slf_attn_list = self.encoder(words, src_pos, return_attns=True)
-        embedded_inputs = self.embedding(words).transpose(1, 2)
+        embedded_inputs = self.embedding(words).transpose(1, 2) # B * D * T
         enc_output = self.TE(embedded_inputs, input_lengths)
 
         '''max_length = mel.size(2)
         mel = (mel.transpose(1, 2) + self.position_enc(mel_pos)[:, :max_length]).transpose(1, 2)'''
 
         for k in range(self.n_flows):
-            if k % self.n_early_every == 0 and k > 0:
+            '''if k % self.n_early_every == 0 and k > 0:
                 output_mel.append(mel[:,:self.n_early_size,:])
-                mel = mel[:,self.n_early_size:,:]
+                mel = mel[:,self.n_early_size:,:]'''
             
             mel, log_det_W = self.convinv[k](mel)
             log_det_W_list.append(log_det_W)
+            
 
             n_half = int(mel.size(1)/2)
+
             mel_0 = mel[:,:n_half,:]
             mel_1 = mel[:,n_half:,:]
 
-            output, dec_enc_attn = self.decoder[k](mel_0, enc_output)
+            output, _, alignment = self.TD[k](enc_output, mel_0, input_lengths)
+            dec_enc_attn.append(alignment)
             log_s = output[:, n_half:, :]
             t = output[:, :n_half, :]
             mel_1 = torch.exp(log_s)*mel_1 + t
@@ -221,9 +231,10 @@ class WaveGlow(nn.Module):
         output_mel.append(mel)
         return torch.cat(output_mel, 1), log_s_list, log_det_W_list, dec_enc_attn
 
-    def infer(self, words, sigma=1.0):
+    def infer(self, words, input_lengths, sigma=1.0):
 
-        enc_output = Encoder(words) # b * d_enc * t
+        embedded_inputs = self.embedding(words).transpose(1, 2)
+        enc_output = self.TE(embedded_inputs, input_lengths) # B * d_enc * T
 
         mel = torch.cuda.FloatTensor(enc_output.size(0), self.n_remaining_channels, self.max_mel_steps).normal_()
         mel = torch.autograd.Variable(sigma*mel)

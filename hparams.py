@@ -92,11 +92,27 @@ def create_hparams(hparams_string=None, verbose=False):
         # WaveGlow parameters          #
         ################################
         sigma=1.0,
-        n_flows=24,
+        n_flows=12,
         n_group=8,
         n_early_every=8,
-        n_early_size=20
+        n_early_size=20,
+        
+        # Decoder parameters
+        n_frames_per_step=1,  # currently only 1 is supported
+        decoder_rnn_dim=1024,
+        prenet_dim=256,
+        max_decoder_steps=1000,
+        gate_threshold=0.5,
+        p_attention_dropout=0.1,
+        p_decoder_dropout=0.1,
 
+        # Attention parameters
+        attention_rnn_dim=1024,
+        attention_dim=128,
+        
+        # Location Layer parameters
+        attention_location_n_filters=32,
+        attention_location_kernel_size=31
     )
 
     if hparams_string:
