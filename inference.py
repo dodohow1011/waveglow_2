@@ -27,15 +27,29 @@
 import os
 from scipy.io.wavfile import write
 import torch
-from mel2samp import files_to_list, MAX_WAV_VALUE
 from denoiser import Denoiser
+from train import load_pretrained_taco, parse_batch 
+from hparams import create_hparams
+from data_utils import TextMelLoader, TextMelCollate
+from torch.utils.data import DataLoader
+import sys
 
-
-def main(mel_files, waveglow_path, sigma, output_dir, sampling_rate, is_fp16,
+os.environ["CUDA_VISIBLE_DEVICES"] = "2"
+def main(text_files, waveglow_path, sigma, output_dir, sampling_rate, is_fp16,
          denoiser_strength):
-    mel_files = files_to_list(mel_files)
+    hparams = create_hparams()
+    Taco2 = load_pretrained_taco('tacotron2.pt', hparams)    
+
+    testset = TextMelLoader(text_files, hparams)
+    collate_fn = TextMelCollate()
+
+    test_loader = DataLoader(testset, num_workers=0, shuffle=False,
+                             sampler=None,
+                             batch_size=1,
+                             pin_memory=False,
+                             drop_last=True, collate_fn=collate_fn)
     waveglow = torch.load(waveglow_path)['model']
-    waveglow = waveglow.remove_weightnorm(waveglow)
+    # waveglow = waveglow.remove_weightnorm(waveglow)
     waveglow.cuda().eval()
     if is_fp16:
         from apex import amp
@@ -44,24 +58,27 @@ def main(mel_files, waveglow_path, sigma, output_dir, sampling_rate, is_fp16,
     if denoiser_strength > 0:
         denoiser = Denoiser(waveglow).cuda()
 
-    for i, file_path in enumerate(mel_files):
-        file_name = os.path.splitext(os.path.basename(file_path))[0]
-        mel = torch.load(file_path)
-        mel = torch.autograd.Variable(mel.cuda())
-        mel = torch.unsqueeze(mel, 0)
-        mel = mel.half() if is_fp16 else mel
+    for i, batch in enumerate(test_loader):
+        text_padded, input_lengths, mel_padded, max_len, output_lengths = parse_batch(batch)
+        enc_outputs, _ = Taco2((text_padded, input_lengths, mel_padded, max_len, output_lengths))
+        # mel = torch.autograd.Variable(mel.cuda())
+        # mel = torch.unsqueeze(mel, 0)
+        # mel = mel.half() if is_fp16 else mel
         with torch.no_grad():
-            audio = waveglow.infer(mel, sigma=sigma)
-            if denoiser_strength > 0:
+            mel = waveglow.infer(enc_outputs, input_lengths, sigma=sigma)
+            '''if denoiser_strength > 0:
                 audio = denoiser(audio, denoiser_strength)
-            audio = audio * MAX_WAV_VALUE
-        audio = audio.squeeze()
-        audio = audio.cpu().numpy()
-        audio = audio.astype('int16')
-        audio_path = os.path.join(
-            output_dir, "{}_synthesis.wav".format(file_name))
-        write(audio_path, sampling_rate, audio)
-        print(audio_path)
+            audio = audio * MAX_WAV_VALUE'''
+        # audio = audio.squeeze()
+        # mel = mel.cpu().numpy()
+        # audio = audio.astype('int16')
+        print (mel)
+        mel = mel.squeeze()
+        print (mel.size())
+        mel_path = os.path.join(
+            output_dir, "{}_synthesis.pt".format(i))
+        torch.save(mel, mel_path)
+        print(mel_path)
 
 
 if __name__ == "__main__":
@@ -74,7 +91,7 @@ if __name__ == "__main__":
     parser.add_argument('-o', "--output_dir", required=True)
     parser.add_argument("-s", "--sigma", default=1.0, type=float)
     parser.add_argument("--sampling_rate", default=22050, type=int)
-    parser.add_argument("--is_fp16", action="store_true")
+    parser.add_argument("--is_fp16", default=False, action="store_true")
     parser.add_argument("-d", "--denoiser_strength", default=0.0, type=float,
                         help='Removes model bias. Start with 0.1 and adjust')
 

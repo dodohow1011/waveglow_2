@@ -42,8 +42,9 @@ from data_utils import TextMelLoader, TextMelCollate
 from hparams import create_hparams
 from utils import to_gpu
 from logger import waveglowLogger
+from Taco2 import Tacotron2
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "2"
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
 def load_checkpoint(checkpoint_path, model, optimizer):
     assert os.path.isfile(checkpoint_path)
@@ -84,6 +85,12 @@ def prepare_directories_and_logger(output_directory, log_directory):
     
     return logger
 
+def load_pretrained_taco(taco2_path, hparams):
+    assert os.path.isfile(taco2_path)
+    checkpoint_dict = torch.load(taco2_path, map_location='cpu')
+    Taco2 = Tacotron2(hparams).cuda()
+    Taco2.load_state_dict(checkpoint_dict['state_dict'])
+    return Taco2
 
 def train(num_gpus, rank, group_name, output_directory, log_directory, checkpoint_path, hparams):
     torch.manual_seed(hparams.seed)
@@ -96,6 +103,8 @@ def train(num_gpus, rank, group_name, output_directory, log_directory, checkpoin
 
     criterion = WaveGlowLoss(hparams.sigma)
     model = WaveGlow(hparams).cuda()
+
+    Taco2 = load_pretrained_taco('tacotron2.pt', hparams)
 
     #=====START: ADDED FOR DISTRIBUTED======
     if num_gpus > 1:
@@ -150,8 +159,11 @@ def train(num_gpus, rank, group_name, output_directory, log_directory, checkpoin
             model.zero_grad()
 
             text_padded, input_lengths, mel_padded, max_len, output_lengths = parse_batch(batch)
+            with torch.no_grad():
+                enc_outputs, alignments = Taco2((text_padded, input_lengths, mel_padded, max_len, output_lengths))
+
             # mel_padded = mel_padded.transpose(1, 2)
-            mel_padded = mel_padded / torch.abs(mel_padded).max().item()
+            # mel_padded = mel_padded / torch.abs(mel_padded).max().item()
             mel_pos = torch.arange(1000)
             mel_pos = to_gpu(mel_pos).long().unsqueeze(0)
             mel_pos = mel_pos.expand(hparams.batch_size, -1)
@@ -159,9 +171,9 @@ def train(num_gpus, rank, group_name, output_directory, log_directory, checkpoin
             src_pos = to_gpu(src_pos).long().unsqueeze(0)
             src_pos = src_pos.expand(hparams.batch_size, -1)
             
-            z, log_s_list, log_det_w_list, dec_enc_attn = model(mel_padded, text_padded, mel_pos, src_pos, input_lengths)
-            outputs = (z, log_s_list, log_det_w_list)
-            loss = criterion(outputs)
+            z, log_s_list, log_det_w_list, dec_enc_attn = model(mel_padded, enc_outputs, mel_pos, src_pos, input_lengths)
+            outputs = (z, log_s_list, log_det_w_list, dec_enc_attn)
+            loss = criterion(outputs, alignments)
             if num_gpus > 1:
                 reduced_loss = reduce_tensor(loss.data, num_gpus).item()
             else:
@@ -182,7 +194,7 @@ def train(num_gpus, rank, group_name, output_directory, log_directory, checkpoin
 
             if (iteration % hparams.iters_per_checkpoint == 0):
                 if rank == 0:
-                    logger.log_alignment(model, dec_enc_attn, iteration)
+                    logger.log_alignment(model, dec_enc_attn, alignments, iteration)
                     checkpoint_path = "{}/waveglow_{}".format(
                         output_directory, iteration)
                     save_checkpoint(model, optimizer, learning_rate, iteration,

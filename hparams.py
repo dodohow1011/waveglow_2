@@ -10,7 +10,7 @@ def create_hparams(hparams_string=None, verbose=False):
         # Experiment Parameters        #
         ################################
         epochs=500,
-        batch_size=3,
+        batch_size=4,
         iters_per_checkpoint=1000,
         seed=1234,
         dynamic_loss_scaling=True,
@@ -62,8 +62,8 @@ def create_hparams(hparams_string=None, verbose=False):
 
         dropout=0.1,
 
-        encoder_kernel_size = 5,
-        encoder_n_convolutions = 3,
+        encoder_kernel_size=5,
+        encoder_n_convolutions=3,
         encoder_embedding_dim=512,
         
         # Mel-post processing network parameters
@@ -92,9 +92,9 @@ def create_hparams(hparams_string=None, verbose=False):
         # WaveGlow parameters          #
         ################################
         sigma=1.0,
-        n_flows=12,
+        n_flows=6,
         n_group=8,
-        n_early_every=8,
+        n_early_every=4,
         n_early_size=20,
         
         # Decoder parameters
