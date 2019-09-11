@@ -44,7 +44,7 @@ from utils import to_gpu
 from logger import waveglowLogger
 from Taco2 import Tacotron2
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+#os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
 def load_checkpoint(checkpoint_path, model, optimizer):
     assert os.path.isfile(checkpoint_path)
@@ -170,6 +170,8 @@ def train(num_gpus, rank, group_name, output_directory, log_directory, checkpoin
             src_pos = torch.arange(hparams.n_position)
             src_pos = to_gpu(src_pos).long().unsqueeze(0)
             src_pos = src_pos.expand(hparams.batch_size, -1)
+
+            mel_padded = (mel_padded+5)/10
             
             z, log_s_list, log_det_w_list, dec_enc_attn = model(mel_padded, enc_outputs, mel_pos, src_pos, input_lengths)
             outputs = (z, log_s_list, log_det_w_list, dec_enc_attn)
@@ -194,7 +196,8 @@ def train(num_gpus, rank, group_name, output_directory, log_directory, checkpoin
 
             if (iteration % hparams.iters_per_checkpoint == 0):
                 if rank == 0:
-                    logger.log_alignment(model, dec_enc_attn, alignments, iteration)
+                    mel_predict, test_attn = model.test(mel_padded, enc_outputs, mel_pos, src_pos, input_lengths)
+                    logger.log_alignment(model, dec_enc_attn, alignments, mel_padded, mel_predict, test_attn, iteration)
                     checkpoint_path = "{}/waveglow_{}".format(
                         output_directory, iteration)
                     save_checkpoint(model, optimizer, learning_rate, iteration,

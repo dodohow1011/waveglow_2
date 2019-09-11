@@ -235,6 +235,29 @@ class WaveGlow(nn.Module):
         output_mel.append(mel)
         return torch.cat(output_mel, 1), log_s_list, log_det_W_list, dec_enc_attn
 
+    def test(self, mel, enc_output, mel_pos, src_pos, input_lengths):
+
+        dec_enc_attn = []
+        mel = torch.cuda.FloatTensor(enc_output.size(0), 80, mel.size(2)).normal_()
+        mel = torch.autograd.Variable(mel)
+
+        for k in reversed(range(self.n_flows)):
+            n_half = int(mel.size(1)/2)
+            mel_0 = mel[:,:n_half,:]
+            mel_1 = mel[:,n_half:,:]
+
+            output, _, alignment = self.TD[k](enc_output, mel_0, input_lengths)
+            dec_enc_attn.append(alignment)
+            s = output[:, n_half:, :]
+            b = output[:, :n_half, :]
+            mel_1 = (mel_1 - b)/torch.exp(s)
+            mel = torch.cat([mel_0, mel_1],1)
+
+            mel = self.convinv[k](mel, reverse=True)
+
+        return mel, dec_enc_attn
+
+
     def infer(self, enc_output, input_lengths, sigma=1.0):
         print (input_lengths)
 
